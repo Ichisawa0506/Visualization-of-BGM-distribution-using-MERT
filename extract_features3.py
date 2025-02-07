@@ -33,9 +33,11 @@ import glob
 import csv
 
 # 楽曲の処理前のみ実行
+# 楽曲保存用のファイルを作成
 #os.makedirs('/content/drive/MyDrive/data/custom_audio_dataset_manifest', exist_ok=True)
 #os.makedirs('/content/drive/MyDrive/data/custom_audio_dataset', exist_ok=True)
 
+# 楽曲の長さを指定する場合の設定
 # Cut_mp3作成前だけ実行
 #wav_files = glob.glob("/content/drive/MyDrive/Dataset_cut_wav*.wav")
 #mp3_files = glob.glob("/content/drive/MyDrive/MusicData/**/*.mp3", recursive=True)  # 元のmp3ファイルのパス
@@ -76,28 +78,28 @@ import csv
 #        print(e)
 #        continue
 
-
+# サンプリングレートを24000Hzまで圧縮する。これより下では、custom_audio_dataset_manifestからmp3を読み込んでいる
 #!python /content/MERT/scripts/prepare_manifest.py --root-dir /content/drive/MyDrive/MusicData \
 #      --target-rate 24000 --converted-root-dir /content/drive/MyDrive/data/custom_audio_dataset \
 #      --out-dir /content/drive/MyDrive/data/custom_audio_dataset_manifest --extension mp3
 
 # モデルと出力するディレクトリ、シャードとその開始地点の設定
+# RAMの節約のためにバッチサイズごとに特徴抽出 → csv保存を行っている。不要であれば削除
 # 380,383,387,391,494は特徴抽出不可
-model_name = "m-a-p/MERT-v1-95M"  # 使用するモデル名
+model_name = "m-a-p/MERT-v1-95M"  # 使用するモデル名、v1-330Mへの変更も可能
 data_dir = "/content/drive/MyDrive/data/custom_audio_dataset"  # オーディオデータのディレクトリ
 output_file = "/content/drive/MyDrive/Dataset/features_MERT-v1-95M.csv"  # 出力ファイル名
 sampling_rate = 24000  # オーディオのサンプルレート
 files_per_shard = 10 # 分割するファイル数
-start_index = 630 # 再開するファイルのインデックス
-batch_size = 1  # バッチサイズ（10件ごとに保存）
+start_index = 0 # 再開するファイルのインデックス
+batch_size = 10  # バッチサイズ（10件ごとに保存）
 
 # モデルとプロセッサ、データセットの読み込み
 model = AutoModel.from_pretrained(model_name, trust_remote_code=True)
 processor = Wav2Vec2FeatureExtractor.from_pretrained(model_name, trust_remote_code=True)
 dataset = load_dataset("audiofolder", data_dir=data_dir, split="train")
 
-# ファイル分割の設定
-
+# ファイル分割の設定、分割しない場合はスキップ
 # シャードの数を計算
 num_shards = len(dataset) // files_per_shard + (len(dataset) % files_per_shard > 0)
 
@@ -134,7 +136,7 @@ def extract_trackname(audio_path):
 
 """# 特徴抽出"""
 
-# 特徴抽出と圧縮、保存 1シャードあたり3時間くらい
+# 特徴抽出と圧縮、保存 1シャードあたり3時間くらい、楽曲の長さに依存する
 total_file_index = 0  # 全体のファイルインデックスを初期化
 for shard_index in range(num_shards):
     shard_dataset = load_dataset("audiofolder", data_dir=os.path.join(shard_dir, f"shard_{shard_index}"), split="train")
@@ -157,11 +159,15 @@ for shard_index in range(num_shards):
             outputs = model(**inputs, output_hidden_states=True)
 
        # すべての層の特徴を取得 (1~13層目)
+       # np.meanでtimestepを平均化している。平均を使用しない場合は、特徴の保存形式を変更する必要がある。
+       # 例えば１つのcsvに1つの楽曲を保存や、layer_timestep_featureNのような保存形式する。
+       # １楽曲あたりのデータ量も多いため、取り扱いには注意
         all_layer_features = [np.mean(outputs.hidden_states[layer_index].numpy(), axis=0) for layer_index in range(13)]
 
         row_data = {'trackname': extract_trackname(item["audio"]["path"])}  # 音楽ファイル名
 
         # すべての層の特徴を1行に保存
+        # 保存方法の変更はこの部分を変更
         for layer_index, layer_features in enumerate(all_layer_features):
             row_data.update({f'{layer_index}_feature{feature_index}': value
                              for feature_index, value in enumerate(layer_features)})
@@ -181,6 +187,9 @@ for shard_index in range(num_shards):
         compressed_df.to_csv(output_file, mode='a', header=False, index=False)
 
 print(f"特徴抽出と圧縮が完了し、{output_file} に保存されました。")
+
+
+## 以下はMERTで実装されたCNN圧縮を試したコードなので、不要であれば削除
 
 # 特徴抽出と圧縮、保存 1シャードあたり3時間くらい
 total_file_index = 0  # 全体のファイルインデックスを初期化
